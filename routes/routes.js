@@ -4,7 +4,7 @@ const router = express.Router();
 const API = require("../api/api")
 const session = require("express-session");
 const Mongodbsession = require("connect-mongodb-session")(session)
-const Uri = process.env.Uri
+const Uri = 'mongodb+srv://moseremzy:iURyEjpibBSycfNT@cluster0.6hmfmuw.mongodb.net/Banking?retryWrites=true&w=majority'
 const multer = require("multer");
 
 
