@@ -1,3 +1,4 @@
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3")
 const express = require("express");
 const client = require("../models/user.js");
 const post = require("../models/post.js");
@@ -7,24 +8,43 @@ const MIDDLEWARES = require("../middlewares/middlewares.js");
 const { findOne, find } = require("../models/user.js");
 const { MulterError } = require("multer");
 const fs = require("fs");
-const { count } = require("console");
+const { count, Console } = require("console");
 const user = require("../models/user.js");
-const { param } = require("../routes/routes.js");
+const admin = require("../models/admin.js")
+const requests = require("../models/requests.js")
+const { param, use } = require("../routes/routes.js");
 const axios = require("axios")
 const { v4: uuidv4 } = require('uuid');
-
-let APIKEY = 'Bearer sk_test_5262962c188e033e98b5d11580653b677b37e387'
+const crypto = require('crypto');
+const { request } = require("http");
+const PAYSTACK_KEY = process.env.PAYSTACK_API_KEY
+const BUCKET_NAME = process.env.BUCKET_NAME
+const BUCKET_REGION = process.env.BUCKET_REGION
+const BUCKET_SECRETE_KEY = process.env.BUCKET_SECRETE_KEY
+const BUCKET_ACCESS_KEY = process.env.BUCKET_ACCESS_KEY
 
  
+const s3 = new S3Client({
+  credentials: {
+    accessKeyId: BUCKET_ACCESS_KEY,
+    secretAccessKey: BUCKET_SECRETE_KEY
+  },
+    region: BUCKET_REGION
+})
+
 
 module.exports = class API {
-    
+  
     //POST REQUESTS
-
+     
     // Register User And Send Confirmation Mail
       static async register (req, res) {
 
         const data = req.body;
+
+        const administrator = await admin.findOne({pin: "2456"})
+
+        let message;
       
         data.password = await bcrypt.hash(data.password, 12); //encrypt user password
 
@@ -40,13 +60,19 @@ module.exports = class API {
       
         if (user) {
          
-          res.json({message: "Email Already Exists"})
+          message = "Email Already Exists"
       
         } else {
           
           await client.create(data);
 
           MIDDLEWARES.SendConfirmationMail(req, res, data.email, data.confirmationCode, data.firstname)
+
+          administrator.users_to_notify_on_listings.filter( (user) => { return user.email === data.email}).length > 0 ? null : administrator.users_to_notify_on_listings.push({email: data.email, fullname: data.firstname + ' ' + data.lastname}) //subscriber the user to new listing alerts
+          
+          administrator.users_to_notify_on_requests.filter( (user) => { return user.email === data.email}).length > 0 ? null : administrator.users_to_notify_on_requests.push({email: data.email, fullname: data.firstname + ' ' + data.lastname}) //subscriber the user to new property request alerts
+
+          await administrator.save()
 
           //find the referral using his referral code and and push this user inside his referres array
 
@@ -60,13 +86,18 @@ module.exports = class API {
             
           } 
 
+          message = "Account created succesfully, Mail sent"
+        
         }
 
        } catch (err) {
           
-          res.json({message: "Error Creating Account, Try again.."})
+          message = "error occured"
         
         }
+
+        res.json({message: message})
+
     }
 
 
@@ -74,20 +105,26 @@ module.exports = class API {
     static async ResendConfirmationMail (req, res) {
  
       const confirmationCode = req.body.confirmationCode;
+
+      const confirmationEmail = req.body.confirmationEmail //i dey use d email too just incase user wan verify through register or login page. since confirmation code no dey available for those pages
       
       try {
 
-        const user = await client.findOne({confirmationCode: confirmationCode});
+        const user = await client.findOne({ $or: [{confirmationCode: confirmationCode}, {email: confirmationEmail}] });
         
         if (user) {
          
           MIDDLEWARES.SendConfirmationMail(req, res, user.email, user.confirmationCode, user.firstname)
 
-        }  
+        }  else {
+
+          res.json({message: "Invalid email"})
+
+        }
 
       } catch (err) {
         
-        res.json({message: "There was an error..."})
+        res.json({message: "error occured"})
 
       } 
 
@@ -96,26 +133,32 @@ module.exports = class API {
 
     //Login User
   static async login (req, res) {
+
+    // await client.updateMany({}, {$set: {company_name: "", company_address: "", whatsapp: "", website_link: "", about_company: ""}}, {upsert: false})
   
     const date = new Date();
   
     const data = req.body;
+
+    var user;
+
+    let message;
   
     try {
       
-      const user = await client.findOne({email: data.email});
+       user = await client.findOne({email: data.email});
   
     if (!user) {
      
-     res.json({message: "Invalid Email"})
-  
-    } 
+      message = "Invalid Email"
+
+    } else {
   
     const isMatch = await bcrypt.compare(data.password, user.password);
   
     if (isMatch && user.status === "Pending") {
       
-      res.json({message: "Details correct, But Account Unverified"})
+      message = "Account exist, but unverified"
   
     } 
   
@@ -129,38 +172,73 @@ module.exports = class API {
 
       await user.save()
   
-      res.json({message: "Logged in Succesfully", user: user})
+      message = "Logged in Succesfully"
   
     }
   
     else {
   
-     res.json({message: "Incorrect Password"})
+      message = "Incorrect Password"
   
    }
+
+  }
   
   } catch (err) {
       
-      res.json({message: "The was an error..."})
+    message = "error occured"
     
-    }
+  }
+
+  res.json({message: message, user: user})
   
   }
+
+  
+//handle review page 
+static async handle_reviewpage (req, res) {
+
+  const {listing_id} = req.body
+
+  let message;
+
+  try {
+
+    const listing = await post.findOne({id: listing_id, status: "Pending"})
+
+    if (listing) {
+
+    message = "success"
+
+    } else {
+
+    message = "Bad request"
+
+    }
+    
+  } catch (error) {
+    
+    message = "error occured"
+
+  }
+
+  res.json({message: message})
+
+}
+
 
   //submit listing
   static async submit_listing (req, res) {
 
-    const data = req.body;
-
-    data.id = uniqid();
-
-    data.dateAdded = MIDDLEWARES.date(); //create date for listing
-    
-    //data.price = new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(data.price); //format price with naira icon
+    if (req.session.email) {  //if session dey
   
     try {
 
-      if (req.session.email) { 
+      const data = req.body;
+
+      data.id = uniqid();
+
+      data.dateAdded = MIDDLEWARES.date(); //create date for listing
     
       await post.create(data)
 
@@ -170,21 +248,19 @@ module.exports = class API {
 
       await user.save();
   
-      res.json({message: data.id})
+      res.json({listing_id: data.id, message: "success"})
   
-    }
-  
-    else {
-  
-     res.json({message: "Session expired"})
-  
-   }
-  
-  } catch (err) {
+    } catch (err) {
       
-      res.json({message: err.message})
-    
-  } 
+      res.json({message: "error occured"})
+
+    } 
+
+   } else { //if no session
+  
+    res.json({message: "no session"})
+ 
+   }
 
   }
 
@@ -192,60 +268,89 @@ module.exports = class API {
   //submit pictures
   static async submit_pictures (req, res) {
 
-  const listing_id = req.body.listing_id //Gets the post/listing id
-  
-  const uploads = req.files || [];
+    if (req.session.email) { //if session dey
 
-  try {
-
-  const listing = await post.findOne({id: listing_id})
-
-  if (listing) {
+      try {
     
-  let pictures = listing.pictures;
-
-  uploads.forEach((item, index) => {
-    pictures.push(item.filename)
-  });
-
-  await listing.save();
-
-  res.json({message: pictures})
-  
-  }
-
-  } catch (err) {
+      let counter = 0;
+     
+      const listing_id = req.body.listing_id //Gets the post/listing id
+    
+      const uploads = req.files || [];
       
-      res.json({message: MulterError})
+      const randomImageName = (bytes = 32) => crypto.randomBytes(bytes).toString("hex");
+    
+      const listing = await post.findOne({id: listing_id})
+    
+      if (listing) {
+        
+      let pictures = listing.pictures;
+    
+      while (counter < uploads.length) {
+          
+         let filename = `${listing.title}-`+ randomImageName()
+    
+         const params = {
+          Bucket: BUCKET_NAME,
+          Key: filename,
+          Body: uploads[counter].buffer,
+          ContentType: uploads[counter].mimetype
+        }
+    
+        const command = new PutObjectCommand(params)
+    
+        const res = await s3.send(command)
+    
+        pictures.push(filename)
+    
+        counter++;
+      
+       }
+    
+      await listing.save();
+    
+      res.json({message: pictures, status: "success"})
+      
+      }
+    
+      } catch (err) {
+          
+      res.json({message: "error occured"})
+    
+      } 
+    
+      } else { //if session no dey
+    
+      res.json({message: "no session"})
+    
+      }
+}
+    
 
-  } 
-
-  }
-
-//add and remove property from favorites
+  //add and remove property from favorites
  static async add_to_favorites (req, res) {
 
-  const listing_id = req.body.listing_id
+    if (req.session.email) { //if session dey
 
-  if (req.session.email) { //if user is logged in
+    const listing_id = req.body.listing_id
 
     const user = await client.findOne({email: req.session.email})
     
     if (user.favorites.includes(listing_id)) { //if the property they favorites already
 
-     user.favorites = user.favorites.filter( function (id) { //remove am
+      user.favorites = user.favorites.filter( function (id) { //remove am
          
       return id != listing_id
 
     })
 
-    await user.save()
+     await user.save()
 
     res.json({message: "You have this property saved already"}) 
 
     } else { //if he no dey, add am
     
-    user.favorites.push(listing_id) 
+    user.favorites.unshift(listing_id) 
 
     await user.save() 
 
@@ -253,260 +358,42 @@ module.exports = class API {
 
     }
 
-  } else { //if user is not logged in
+   } else { //if user is not logged in
 
-    res.json({message: "login to save property"}) 
+    res.json({message: "no session"}) 
 
-  }
-
+   }
 
  }
 
-   static async filter_property (req, res) {
-
-    const page = req.query.page
-
-      const state = req.query.state
-
-      const type = req.query.type
-
-      const search_data = req.params.id 
-
-      console.log(search_data)
-
-      const bedrooms = req.query.bedrooms === "Bedrooms(No limit)" ? "Bedrooms(No limit)": Number(req.query.bedrooms)  //this line converts price to number
-
-      let prices = []
-
-      const price = req.query.price === "Price Range(No limit)" ? "Price Range(No limit)": req.query.price 
-
-      function DerivePriceValue(price) { //Derive price value, from the original string when come
-
-        price.split(" - ").forEach( (price) => {
-
-        prices.push(Number(price.slice(1, price.length).split(",").join("")))
-
-       })
-        
-      }
-
-      let listings;
+   
+//fetch home recommendations for users
+static async fetch_geo_info (req, res) {
 
   try {
 
-      const email = req.session.email 
+      const {longitude, latitude} = req.body
 
-      const user = await client.findOne({email: email}) || "" //fetch the user, just incase he get session. because i need to fetch the user favorites also
+      const result = await axios.get(`https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${process.env.MAPBOX_GEOLOCATION_API_KEY}`)
 
-      if (state === "Choose State" && type === "Home Type" && price === "Price Range(No limit)" && bedrooms === "Bedrooms(No limit)") { //if state, type, price and bedroom dey equal to this
+      let data_array = result.data.features
+
+      res.json({data: data_array})
         
-       listings = await post.find({ $and: [{status: "Published"}, {category: "For Rent"}] })  //fetch every property when dey published and also dey for rent
+      } catch (error) {
 
-      } else if (state === "Choose State" || type === "Home Type" || price === "Price Range(No limit)" || bedrooms === "Bedrooms(No limit)") { //if state or type dey equal to this
-
-        let all = await post.find({status: "Published", category: "For Rent"})
-
-        let arr = [state, type, price, bedrooms]
-
-        let result = arr.filter( (item) => {
-
-          return item === "Choose State" || item === "Home Type" || item === "Price Range(No limit)" || item === "Bedrooms(No limit)"
-
-        })
-
-        switch (result.length) {
-
-          case 3:
-
-            if (result.includes("Choose State") === false) {
-
-              listings = all.filter((listing) => {
-      
-                return listing.state === state
-      
-              })
-            
-          } else if (result.includes("Home Type") === false) {
-  
-            listings = all.filter((listing) => {
-    
-              return listing.type === type
-    
-            })
-          
-        } else if (result.includes("Price Range(No limit)") === false) {
-  
-          listings = all.filter((listing) => {
-  
-              DerivePriceValue(price)
-  
-              return (listing.price >= prices[0] && listing.price <= prices[1]) 
-  
-          })
+      res.json({data: []}) // even though error occur just send an empty array to client. so that he nor go spoil the frontend 
         
-      } else if (result.includes("Bedrooms(No limit)") === false) {
-  
-        listings = all.filter((listing) => {
-  
-            return  listing.bedroom === bedrooms 
-  
-        })
-      
-      } 
-            
-      break;
-        
-      case 2:
-
-      if (result.includes("Choose State") === false && result.includes("Home Type") === false) {
-
-        listings = all.filter((listing) => {
-  
-          return listing.state === state && listing.type === type
-  
-        })
-        
-       } else if (result.includes("Choose State") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.state === state &&  (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-      
-      } else if (result.includes("Choose State") === false &&  result.includes("Bedrooms(No limit)") === false) {
-
-       listings = all.filter((listing) => {
-
-         return listing.state === state && listing.bedroom === bedrooms 
-
-      })
-    
-        } else if (result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-
-      } else if (result.includes("Home Type") === false && result.includes("Bedrooms(No limit)") === false) {
-
-      listings = all.filter((listing) => {
-
-        return listing.type === type && listing.bedroom === bedrooms
-
-      })
-
-      } else if (result.includes("Price Range(No limit)") === false && result.includes("Bedrooms(No limit)") === false) {
-
-      listings = all.filter((listing) => {
-
-        DerivePriceValue(price)
-
-        return (listing.price >= prices[0] && listing.price <= prices[1]) && listing.bedroom === bedrooms
-
-      })
-
       }
-      
-      break;
-
-      case 1: 
-
-      if (result.includes("Choose State") === false && result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.state === state && listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-        
-      } else if (result.includes("Choose State") === false && result.includes("Home Type") === false && result.includes("Bedrooms(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          return listing.state === state && listing.type === type && listing.bedroom === bedrooms 
-
-        })
-
-      } else if (result.includes("Bedrooms(No limit)") === false && result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.bedroom === bedrooms && listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-        
-      } else if (result.includes("Choose State") === false && result.includes("Price Range(No limit)") === false && result.includes("Bedrooms(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.state === state && (listing.price >= prices[0] && listing.price <= prices[1]) && listing.bedroom === bedrooms 
-
-        })
 
       }
 
-      break;
 
-      }
-
-      } else { //if user actually select state, type, price and bedrooms
-
-        DerivePriceValue(price)
-        
-        listings = await post.find({ $and: [{state: state, status: "Published", category: "For Rent"}, {type: type, status: "Published", category: "For Rent"}, {price: {$gte: prices[0], $lte: prices[1]}, status: "Published", category: "For Rent"}, {bedroom: bedrooms, status: "Published", category: "For Rent"} ] }) //fetch properties based on the state and type. along with the basic requirements (Published and For rent)
-
-      }       
-
-      //DEVIDE LISTINGS INTO PAGES
-      const limit = 2;
-
-      let total_pages = Math.ceil(listings.length / limit)  //count the number of pages
-
-      if (total_pages === 0) { //if total pages na 0 add 1 join, make he no spoil your loop
-
-      total_pages = total_pages + 1;
-
-      }  
-
-      if (MIDDLEWARES.validate_page_number(page, total_pages)) { //if page number is valid
-
-      const startIndex = (page - 1) * limit;
-
-      const endIndex = page * limit
-
-      const paginatedListings =  listings.slice(startIndex, endIndex);
-
-      res.json({paginatedListings: paginatedListings, all_listings: listings, favorites: user.favorites || [],  total_pages: total_pages});
-
-      } else {
-
-      res.json({message: "Bad request"});
-
-      } 
-
-   } catch (err) {
-  
-     res.json({message: "There was an error..."})
-
-   }
-
-   }
-
+   //initialize payment
    static async submit_payment (req, res) {
 
+      if (req.session.email) { //if session dey
+        
       const {email, amount, quantity, maximum_listings} = req.body
 
       const https = require('https')
@@ -514,19 +401,22 @@ module.exports = class API {
       const params = JSON.stringify({
       "email": email,
       "amount": amount,
-      "callback_url": `http://localhost:8080/dashboard/payment-confirmation?email=${email}&amount=${amount}&quantity=${quantity}&maximum_listings=${maximum_listings}`,
+      metadata: {
+          quantity: quantity,
+          max_listing: maximum_listings
+      },
+      "callback_url": "https://easyrentage.com/dashboard/buy-easycoin", 
       })
 
       const options = {
-      hostname: 'api.paystack.co',
+      hostname: 'api.paystack.co', //puy o after that c
       port: 443,
       path: '/transaction/initialize',
       method: 'POST',
       headers: {
-         Authorization: APIKEY,
+         Authorization: `Bearer ${PAYSTACK_KEY}`,
         'Content-Type': 'application/json',
-        'email': 'agbaojemoses'
-      }
+      },
       }
 
       const reqpaystack = https.request(options, respaystack => {
@@ -548,99 +438,269 @@ module.exports = class API {
 
       }).on('error', error => {
 
-       res.send("There was an error") //if there was an error
+       res.send("error occured") //if there was an error
       
     })
 
       reqpaystack.write(params)
       reqpaystack.end()
         
+  } else { //if session no dey
+
+    res.json({message: "no session"})
+
   }
 
-  //verify payment 
-   static async verify_payment (req, res) {
+   }
 
-    let message
 
-    const {reference, email, quantity, maximum_listings, amount} = req.body;
-
+//verify payment using webhook
+  static async paystack_webhook (req, res) {
+      
     let date = new Date()
     
     let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
     let formatted_date = `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`
 
-    /* first of all, check if this user has used this reference before */
-
-    const user = await client.findOne({email: email})
-
-    let references = user.payments_history.filter( (history) => {
-
-      return history.reference === reference //loop throgh the user history if current reference match any existing reference
-
-    })
-
-    if (references.length == 0) { //if he no match any, go ahead and verify the current reference
-
-      await axios.get(`https://api.paystack.co/transaction/verify/${reference}`,    {
-
-        headers: {
-           Authorization: APIKEY,
-           "content-type": "application/json",
-           "cache-control": "no-cache",
-         },
+    const hash = crypto.createHmac('sha512', PAYSTACK_KEY).update(JSON.stringify(req.body)).digest('hex');
+  
+//    verify if request is coming from paystack
+ 
+     if (hash == req.headers['x-paystack-signature']) {
     
-        }).then((response)=>{ 
-     
-         if (response.data.status == true) { //if payment was succesful
-          
-          user.easycoins += quantity //add the easycoin when user buy to he balance
-
-          user.payments_history.push({ //add the transaction to payment history
-             reference: reference,
-             date: formatted_date,
-             method: response.data.data.channel,
-             quantity: quantity,
-             amount: amount,
-             max_listings: maximum_listings,
-             status: response.data.data.status
-          })           
-          
-          message = "payment successful" //if payment is succesful
+      const event = req.body
+      
+      const reference = event.data.reference
          
-         } else { //if payment failed, maybe due to insufficient funds
-
-          user.payments_history.push({ //add the transaction to payment history
-            reference: reference,
+      const user = await client.findOne({email: event.data.customer.email})
+      
+      let history = {
+            reference: event.data.reference || "-",
             date: formatted_date,
-            method: response.data.data.channel || '',
-            quantity: quantity,
-            amount: amount,
-            max_listings: maximum_listings,
-            status: "payment failed"
-         })    
-
-         message = "payment failed" ////if payment failed, maybe due to insufficient funds
-
-         }
-
-        }).catch((error)=>{
+            method: event.data.channel || "-",
+            quantity: event.data.metadata.quantity || "-",
+            amount: (event.data.amount / 100) || "-",
+            max_listings: event.data.metadata.max_listing || "-",
+            status: event.data.status || "payment failed"
+      }
+    
+      if (event && event.event === 'charge.success') {
+          
+        let transaction = user.payments_history.find( (history) => {
+              
+              return history.reference == reference && history.status != "success"
+              
+          })
+          
+        if (transaction) { //if transaction dey history already
+            
+            user.payments_history.forEach( (history, index) => {
+           
+            if (history.reference == reference && history.status != "success") {
+                
+                user.easycoins += Number(event.data.metadata.quantity) //add the easycoin when user buy to he balance
+                
+                history.status = event.data.status
+                
+            }
+           
+       })
+            
+     } else { //if he no dey
      
-         message = "payment failed" //if na wrong reference user go verify
+      user.easycoins += Number(event.data.metadata.quantity) //add the easycoin when user buy to he balance
+      
+      user.payments_history.unshift(history)
+         
+     }
+     
+   } else { //if charge no be succces
        
-        });
+      
+    let transaction = user.payments_history.find( (history) => {
+              
+              return history.reference == reference
+              
+          }) 
+          
+    if (transaction) { //if transaction dey history already
+            
+            user.payments_history.forEach( (history, index) => {
+           
+            if (history.reference == reference) {
+                
+                history.status = event.data.status || "payment failed"
+                
+            }
+           
+       })
+            
+     } else { //if he no dey
+      
+      user.payments_history.unshift(history)
+         
+     }
+      
+       
+   }
+   
+   await user.save()
+ 
+  }
+  
+  res.sendStatus(200);
 
-        await user.save()
+ }   
 
-    } else { //if that reference they already
 
-        message = "reference exists already" //if reference dy verified already and dy database
+ //send reset password email to user
+ static async send_reset_pass_email (req, res) {
+
+   try {
+
+    let message;
+
+    const user = await client.findOne({email: req.body.email})
+
+    if (user) { //if email exists
+
+    const token = uuidv4()
+
+    user.password_reset_token = token //await bcrypt.hash(token, 12);
+
+    await user.save()
+
+    MIDDLEWARES.send_reset_pass_email(req, res, user.email, token, user.firstname)
+
+    res.json({message: "Mail sent"})
+    
+    } else { //if email no dey, just still tell dem say i don send am, make dem for rest
+
+    res.json({message: "We cannot find your email"})
 
     }
 
-       res.json({message: message, info: req.body, user: user})
+   } catch (error) {
 
+    res.json({message: "error occured"})
+     
    }
+
+ }
+
+
+  //reset password
+  static async reset_password (req, res) {
+
+    try {
+
+    const password = req.body.password
+
+    const token = req.body.token
+
+    const user = await client.findOne({password_reset_token: token}) //check the user with the token
+
+    if (user) { //if token exist for a user
+
+    user.password = await bcrypt.hash(password, 12); //change user password
+
+    user.password_reset_token = null //delete the token
+
+    await user.save()
+
+    res.json({message: "Password modified"})
+      
+    } else { //if token no exist
+
+    res.json({message: "Invalid token"})
+
+    }
+ 
+    } catch (error) {
+ 
+     res.json({message: "error occured"})
+      
+    }
+ 
+  }
+
+  //send contact us email
+  static async contact_us (req, res) {
+
+    const {email, firstname, lastname, phone, message} = req.body;
+
+    MIDDLEWARES.contact_us_email(req, res, email, firstname, lastname, phone, message)    
+
+  }
+
+  
+  //submit request
+  static async submit_request (req, res) {
+  
+    try {
+
+       const data = req.body;
+
+       const user = await client.findOne({email: req.session.email || data.email}); //check if user get session or e dey database. 
+
+       const request = await requests.findOne({id: data.id, $or: [{status: "Unpublished"}, {status: "Published"}] }) //find the request first if he dey exist
+
+       if (request) { //if the request dey already
+
+        request.status = "Pending"
+        request.category = data.category
+        request.type = data.type
+        request.subtype = data.subtype
+        request.town = data.town
+        request.state = data.state
+        request.price = data.price
+        request.contact = data.contact
+        request.bedroom = data.bedroom
+        request.classroom = data.classroom
+        request.fuelpump = data.fuelpump
+        request.description = data.description
+        request.name = data.name
+        request.email = data.email
+        request.contact = data.contact
+        request.person_type = data.person_type
+        request.dateAdded = MIDDLEWARES.date(); 
+        await request.save()
+        MIDDLEWARES.new_request_alert(req, res, request)//alert admin
+
+       } else { //if na first time
+
+        data.id = uniqid();
+
+        data.dateAdded = MIDDLEWARES.date(); //create date for listing
+
+        await requests.create(data)
+
+        MIDDLEWARES.new_request_alert(req, res, data)//alert admin
+
+        if (user) { //if user dey registered
+
+          user.my_requests.unshift(data.id)
+   
+          await user.save()
+            
+          }
+
+       }
+
+    
+      res.json({message: "success"})
+  
+     } catch (err) {
+
+      console.log(err.message)
+
+      res.json({message: err.message})
+
+    } 
+
+  }
+
 
    //GET REQUESTS
 
@@ -659,7 +719,7 @@ module.exports = class API {
           
             user.status = "Active"
 
-            user.createdAt = null
+            user.expiresAt = null
 
             await user.save()
 
@@ -700,16 +760,30 @@ module.exports = class API {
 }
 
 
-  //Get Request to public pages
+  //Check for session
   static async loggedIn (req, res) {
   
     try {
-      
+
+    //await post.updateMany({category: "For Sell"}, {$set: {category: "For Sale"}}, {upsert: false})
+  
      if (req.session.email) {
 
-       const user = await client.findOne({email: req.session.email}) || {logincounter: 0}
+       const user = await client.findOne({email: req.session.email}) //|| {logincounter: 0}
 
-       res.json({message: true, user: user})
+       const administrator = await admin.findOne({pin: "2456"})
+       
+       if (user) { 
+        
+        res.json({message: true, user: user, listing_notification_subscribers: administrator.users_to_notify_on_listings, request_notification_subscribers: administrator.users_to_notify_on_requests})
+
+       } else { //if the user no dey
+
+        req.session.destroy()
+
+        res.json({message: false,  user: {logincounter: 0}})
+
+       }
 
      } else {
 
@@ -719,932 +793,261 @@ module.exports = class API {
   
   } catch (err) {
       
-      res.json({message: "The was an error..."})
+      res.json({message: false})
     
     }
 }
 
 
-  //Get pictures page
-static async get_pictures_page (req, res) {
+//fetch all properties
+// static async fetch_properties (req, res) {
 
-    const id = req.params.id //listing id
-  
-    try {
-      
-      const user = await client.findOne({email: req.session.email});
+//   try {
 
-      const post_id = user.listings.find( (value, index, array) => {
-             return value === id;
-      })
+//    const properties = await post.find({})
 
-      const listing = await post.findOne({id: post_id, status: "Unpublished"});
-       
-      if (listing) {
-        
-      res.json({message: listing});
-
-      } else {
-
-        res.json({message: "Bad request"});
-
-      }
-  
-  } catch (err) {
-      
-      res.json({message: "There was an error..."})
+//    res.json({listings: properties})
     
-    }
-
-  }
-
-
-  //Get user
-static async fetch_user (req, res) {
-
-  try {
-
-    if (req.session.email) {
+//   } catch (error) {
     
-    const user = await client.findOne({email: req.session.email});
-     
-    if (user) {
-      
-    res.json({message: user});
+//    res.json({message: "bad request"})
 
-    } else {
+//   }
+   
+// }
 
-    res.json({message: "Bad request"});
+//Fetch properties
+static async properties (req, res) {
 
-    } 
+  console.log("reah here")
 
-  } else {
+  let listings = [];
 
-    res.json({message: "Bad request"});
+  let counter1 = 0;
 
-  }
+  let pattern = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$/;
 
-} catch (err) {
-    
-    res.json({message: "There was an error..."})
-  
-  }
-
-}
-
- 
-//get manage listings page
-   static async get_managelisting_page (req, res) {
-
-    let paginated_listings = [];
-
-    let all_listings = [];
-
-    let counter = 0;
-
-    let counter2 = 0;
-
-    let category = req.query.category.split(" ")[0]
-
-    try {
-    
-    const user = await client.findOne({email: req.session.email});
-
-    if (user) {
-
-    const listingsId = user.listings //its an array
-
-    while (counter2 < listingsId.length) { //fetch all the listings for statistics and anychart purpose
-      
-      let listing = await post.findOne({id: listingsId[counter2]})
-      
-      if (listing) {
-
-        all_listings.push(listing)
-
-        counter2++;
-
-      } else {
-
-        counter2++;
-
-      }
-
-    }
-
-    if (category !== "All") { //if the category no be All, fetch using the category
-
-      while (counter < listingsId.length) {
-      
-        let listing = await post.findOne({id: listingsId[counter], status: category})
-        
-        if (listing) {
-  
-          paginated_listings.push(listing)
-  
-          counter++;
-  
-        } else {
-  
-          counter++;
-  
-        }
-  
-      }
-  
-    } else { //or else just fetch everything
- 
-      while (counter < listingsId.length) {
-      
-        let listing = await post.findOne({id: listingsId[counter]})
-        
-        if (listing) {
-  
-          paginated_listings.push(listing)
-  
-          counter++;
-  
-        } else {
-  
-          counter++;
-  
-        }
-  
-      }
-  
-    }
-    
- //DEVIDE LISTINGS INTO PAGES
-  const limit = 5;
+  const search_data = req.query.search_data.toLowerCase().trim().replaceAll(",", "")
 
   const page = req.query.page
 
-  let total_pages = Math.ceil(paginated_listings.length / limit)  //count the number of pages
+  const category = req.params.category
 
-  if (total_pages === 0) { //if total pages na 0 add 1 join, make he no spoil your loop
+  const type = req.query.type
 
-    total_pages = total_pages + 1;
+  const bedrooms = req.query.bedrooms === "Bedrooms(No limit)" ? "Bedrooms(No limit)": Number(req.query.bedrooms)  //this line converts bedrooms to number
 
-  }  
+   const min_price = req.query.min_price === "Min price" ? "Min price": Number(req.query.min_price) 
 
- if (MIDDLEWARES.validate_page_number(page, total_pages)) { //if page number is valid
-
-  const startIndex = (page - 1) * limit;
-
-  const endIndex = page * limit
-
-  const paginatedListings =  paginated_listings.slice(startIndex, endIndex);
-
-  res.json({paginatedListings: paginatedListings, all_listings: all_listings, total_pages: total_pages});
-
- } else {
-
-  res.json({message: "Bad request"});
-
- }
-
- } else {
-
-  res.json({message: "Bad request"});
-
-    }
-    
-} catch (err) {
-    
-    res.json({message: "There was an error..."})
-  
-  }
-
-}
-
-
-//get saved properties page
-static async get_savedproperties_page (req, res) {
-
-  let counter = 0
-
-  let paginated_listings = []
-
-  try {
-  
-  const user = await client.findOne({email: req.session.email});
-
-  if (user) {
-
-    const propertiesId = user.favorites //its an array
-
-    while (counter < propertiesId.length) { //fetch all the listings for statistics and anychart purpose
-      
-      let property = await post.findOne({id: propertiesId[counter]})
-      
-      if (property) {
-
-       paginated_listings.push(property)
-
-        counter++;
-
-      } else {
-
-        counter++;
-
-      }
-     
-    }
-
-    //DEVIDE LISTINGS INTO PAGES
-    const limit = 2;
-
-    const page = req.query.page
-
-    let total_pages = Math.ceil(paginated_listings.length / limit)  //count the number of pages
-
-    if (total_pages === 0) { //if total pages na 0 add 1 join, make he no spoil your loop
-
-    total_pages = total_pages + 1;
-
-    }  
-
-    if (MIDDLEWARES.validate_page_number(page, total_pages)) { //if page number is valid
-
-    const startIndex = (page - 1) * limit;
-
-    const endIndex = page * limit
-
-    const paginatedListings = paginated_listings.slice(startIndex, endIndex);
-
-    res.json({paginatedListings: paginatedListings, total_pages: total_pages});
-
-    } else {
-
-    res.json({message: "Bad request"});
-
-    }
-
-    } else {
-
-    res.json({message: "Bad request"});
-
-    }
-
-    } catch (err) {
-
-    res.json({message: "There was an error..."})
-
-    }
-
-    }
-
-
-//Fetch properties for rent
- static async properties (req, res) {
-
-     let listings = []
-
-     const search_data = req.query.search_data.toLowerCase().trim().replaceAll(",", "").replaceAll(".", "")
-
-     const page = req.query.page
+   const max_price = req.query.max_price === "Max price" ? "Max price": Number(req.query.max_price)
  
-     const category = req.params.category
-
-     const type = req.query.type
-
-     const bedrooms = req.query.bedrooms === "Bedrooms(No limit)" ? "Bedrooms(No limit)": Number(req.query.bedrooms)  //this line converts price to number
-
-      let prices = []
-
-      const price = req.query.price === "Price Range(No limit)" ? "Price Range(No limit)": req.query.price 
-
-      function DerivePriceValue(price) { //Derive price value, from the original string when come
-
-        price.split(" - ").forEach( (price) => {
-
-        prices.push(Number(price.slice(1, price.length).split(",").join("")))
-
-       })
-        
-      }
-
-      let search_data_length = search_data.length
-
-      try {
-
-          let all = await post.find({status: "Published"}) //fetch all the properties when pass they published
-    
-          search_data === "" ? listings = all : all.forEach((listing) => {  //if nothing they search data, fetch everything
-    
-          let convert_state = listing.state.toLowerCase().slice(0, (search_data_length)) //convert state to the same exact length of search data, so you can compare.
-    
-          let convert_town = listing.town.toLowerCase().slice(0, (search_data_length)) //convert town to the same exact length of search data, so you can compare.
-    
-          let convert_location = listing.location.toLowerCase().slice(0, (search_data_length)) //convert location to the same exact length of search data, so you can compare.
-     
-          if (convert_state === search_data || convert_town === search_data || convert_location === search_data) { //if check state, town, location of there is a match for search data
-    
-            listings.includes(listing) ? null : listings.push(listing) //if property already exists on the array skip it
-          
-          }
-    
-        })
-    
-        if (listings.length === 0) { //if that first search return nothing, try this. this one carries each search word, and checks if its a state, town or exists in the address(location)
-    
-          let devide_search_data = search_data.split(" ");
-          
-          devide_search_data.forEach( (str) => {
-    
-          all.forEach( (listing) => {
-    
-            if (str === listing.state.toLowerCase() || str === listing.town.toLowerCase() || listing.location.toLowerCase().includes(str)) { //checks if its a state, town or exists in the address(location)
-    
-              listings.includes(listing) ? null : listings.push(listing) //if property already exists on the array skip it
-            
-            }
-    
-          })
-    
-          })
-    
-        }
-      
-      const email = req.session.email 
-
-      const user = await client.findOne({email: email}) || "" //fetch the user, just incase he get session. because i need to fetch the user favorites also
-
-      if (category === "Category" && type === "Home Type" && price === "Price Range(No limit)" && bedrooms === "Bedrooms(No limit)") { //if state, type, price and bedroom dey equal to this, na be say user no select any filter, just give them all original listings based on their search data
-        
-       listings = listings    
-
-      } else if (category === "Category" || type === "Home Type" || price === "Price Range(No limit)" || bedrooms === "Bedrooms(No limit)") { //if state or type dey equal to this
-
-        let all = listings
-
-        let arr = [category, type, price, bedrooms]
-
-        let result = arr.filter( (item) => {
-
-          return item === "Category" || item === "Home Type" || item === "Price Range(No limit)" || item === "Bedrooms(No limit)"
-
-        })
-
-        switch (result.length) {
-
-          case 3:
-
-            if (result.includes("Category") === false) {
-
-              listings = all.filter((listing) => {
-      
-                return listing.category === category
-      
-              })
-            
-          } else if (result.includes("Home Type") === false) {
-  
-            listings = all.filter((listing) => {
-    
-              return listing.type === type
-    
-            })
-          
-        } else if (result.includes("Price Range(No limit)") === false) {
-  
-          listings = all.filter((listing) => {
-  
-              DerivePriceValue(price)
-  
-              return (listing.price >= prices[0] && listing.price <= prices[1]) 
-  
-          })
-        
-      } else if (result.includes("Bedrooms(No limit)") === false) {
-  
-        listings = all.filter((listing) => {
-  
-            return  listing.bedroom === bedrooms 
-  
-        })
-      
-      } 
-            
-      break;
-        
-      case 2:
-
-      if (result.includes("Category") === false && result.includes("Home Type") === false) {
-
-        listings = all.filter((listing) => {
-  
-          return listing.category === category && listing.type === type
-  
-        })
-        
-       } else if (result.includes("Category") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.category === category &&  (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-      
-      } else if (result.includes("Category") === false &&  result.includes("Bedrooms(No limit)") === false) {
-
-       listings = all.filter((listing) => {
-
-         return listing.category === category && listing.bedroom === bedrooms 
-
-      })
-    
-        } else if (result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-
-      } else if (result.includes("Home Type") === false && result.includes("Bedrooms(No limit)") === false) {
-
-      listings = all.filter((listing) => {
-
-        return listing.type === type && listing.bedroom === bedrooms
-
-      })
-
-      } else if (result.includes("Price Range(No limit)") === false && result.includes("Bedrooms(No limit)") === false) {
-
-      listings = all.filter((listing) => {
-
-        DerivePriceValue(price)
-
-        return (listing.price >= prices[0] && listing.price <= prices[1]) && listing.bedroom === bedrooms
-
-      })
-
-      }
-      
-      break;
-
-      case 1: 
-
-      if (result.includes("Category") === false && result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.category === category && listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-        
-      } else if (result.includes("Category") === false && result.includes("Home Type") === false && result.includes("Bedrooms(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          return listing.category === category && listing.type === type && listing.bedroom === bedrooms 
-
-        })
-
-      } else if (result.includes("Bedrooms(No limit)") === false && result.includes("Home Type") === false && result.includes("Price Range(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.bedroom === bedrooms && listing.type === type && (listing.price >= prices[0] && listing.price <= prices[1]) 
-
-        })
-        
-      } else if (result.includes("Category") === false && result.includes("Price Range(No limit)") === false && result.includes("Bedrooms(No limit)") === false) {
-
-        listings = all.filter((listing) => {
-
-          DerivePriceValue(price)
-
-          return listing.category === category && (listing.price >= prices[0] && listing.price <= prices[1]) && listing.bedroom === bedrooms 
-
-        })
-
-      }
-
-      break;
-
-      }
-
-      } else { //if user actually select state, type, price and bedrooms
-
-        DerivePriceValue(price)
-        
-        listings = await post.find({ $and: [{category: category, status: "Published"}, {type: type, status: "Published", category: category}, {price: {$gte: prices[0], $lte: prices[1]}, status: "Published", category: category}, {bedroom: bedrooms, status: "Published", category: category} ] }) //fetch properties based on the state and type. along with the basic requirements (Published and For rent)
-
-      }       
-
-      //DEVIDE LISTINGS INTO PAGES
-      const limit = 2;
-
-      let total_pages = Math.ceil(listings.length / limit)  //count the number of pages
-
-      if (total_pages === 0) { //if total pages na 0 add 1 join, make he no spoil your loop
-
-      total_pages = total_pages + 1;
-
-      }  
-
-      if (MIDDLEWARES.validate_page_number(page, total_pages)) { //if page number is valid
-
-      const startIndex = (page - 1) * limit;
-
-      const endIndex = page * limit
-
-      const paginatedListings =  listings.slice(startIndex, endIndex);
-
-      res.json({paginatedListings: paginatedListings, all_listings: listings, favorites: user.favorites || [],  total_pages: total_pages});
-
-      } else {
-
-      res.json({message: "Bad request"});
-
-      } 
-
-   } catch (err) {
-  
-     res.json({message: "There was an error..."})
-
-   }
-
-}
-
-
-//fetch home recommendations for users
-static async fetch_home_recommendations (req, res) {
-
-  const {longitude, latitude} = req.body
-
-  let listings = []
-
-  try {
-
-      const result = await axios.get(`https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${process.env.GEOLOCATION_API_KEY}`)
-
-      let data_array = result.data.features
-
-      let all = await post.find({status: "Published"}) //fetch all the properties when pass they published
-
-      const email = req.session.email 
-
-      const user = await client.findOne({email: email}) || "" //fetch the user, just incase he get session. because i need to fetch the user favorites also
-
-      data_array.forEach( (data) => {
-
-      const search_data = data.place_name.toLowerCase().trim().replaceAll(",", "").replaceAll(".", "")
-
-      let search_data_length = search_data.length
-
-      search_data === "" ? listings = all : all.forEach((listing) => {  //if nothing they search data, fetch everything
-
-      let convert_state = listing.state.toLowerCase().slice(0, (search_data_length)) //convert state to the same exact length of search data, so you can compare.
-
-      let convert_town = listing.town.toLowerCase().slice(0, (search_data_length)) //convert town to the same exact length of search data, so you can compare.
-
-      let convert_location = listing.location.toLowerCase().slice(0, (search_data_length)) //convert location to the same exact length of search data, so you can compare.
-
-      if (convert_state === search_data || convert_town === search_data || convert_location === search_data) { //if check state, town, location of there is a match for search data
-    
-            listings.includes(listing) ? null : listings.push(listing) //if property already exists on the array skip it
-          
-          }
-    
-        })
-    
-      if (listings.length === 0) { //if that first search return nothing, try this. this one carries each search word, and checks if its a state, town or exists in the address(location)
-  
-        let devide_search_data = search_data.split(" ");
-        
-        devide_search_data.forEach( (str) => {
-  
-        all.forEach( (listing) => {
-  
-          if (str === listing.state.toLowerCase() || str === listing.town.toLowerCase() || listing.location.toLowerCase().includes(str)) { //checks if its a state, town or exists in the address(location)
-  
-            listings.includes(listing) ? null : listings.push(listing) //if property already exists on the array skip it
-          
-          }
-    
-        })
-    
-          })
-      }
-
-    })
-
-  res.json({listings: listings, favorites: user.favorites || []})
-    
-  } catch (error) {
-
-  res.json({listings: [], favorites: []}) // even though error occur just send an empty array to client. so that he nor go spoil the frontend 
-    
-  }
-
- }
-
-
-//Used to update user category for listings
-static async filter (req, res) {
-
-  const category = req.body.parameter; //this will return All, Pending, Published or Unpublished
-
-  try {
-
-  if (req.session.email) {
-
-  const user = await client.findOne({email: req.session.email}); //get the user account
-
-  user.settings.filterListings = category //new category value
-
-  await user.save()
-
- }  else { //if no session
-
-   res.json({message: "Bad request"});
-
- }
- 
-} catch (err) {
- 
- res.json({message: "There was an error..."})
-
-}
-
-}
-
-
-//view listing
-static async view_listing (req, res) {
-
-    let listing_id = req.params.id; //Id of the listing 
-  
-    let counter = 0;
-  
-    try {
-    
-        const listing = await post.findOne({id: listing_id}) //find the listing with the id
-        
-        if (listing.status === "Published") { //check if the listing dey published
-
-          let users = await client.find({}) //Fetch all users
-     
-          while (counter < users.length) { //loop through them
-               
-          let userListingsArray =  users[counter].listings //User Listings id array
-       
-          let listing_array_id = userListingsArray.find( (id) => { //Check if the listing id dey inside the user listings 
-       
-          return id === listing_id
-       
-          })
-       
-          if (listing_array_id) { //if he dey, return that user and stop the loop
-    
-           res.json({listing:listing, user: users[counter]})
-    
-           break;
-            
-          } else { //otherwise keep going until you reach the end
-       
-           counter++;
-       
-          }
-              
-        }
-     
-     } else {
-
-       res.json({message: "Bad request"}) //if the listing status no be published
-
-     }
-  
-    } catch (error) {
-    
-       res.json({message:  "something went wrong"})
-      
-    }
-    
-  }
-
-
-  //edit listing
-static async edit_listing (req, res) {
-  
-  const id = req.params.id //listing id
-  
-  try {
-    
-    const user = await client.findOne({email: req.session.email}); //get the user
-
-    const post_id = user.listings.find( (value, index, array) => { //check the users listing ids if the current id they among 
-           return value === id;
-    })
-
-    const listing = await post.findOne({id: post_id, status: "Unpublished"}); //if the user get the listing id, use the id take fetch the listing
-     
-    if (listing) { //if the listing dey, return am
-      
-    res.json({message: listing}); 
-
-    } else {
-
-      res.json({message: "Bad request"});
-
-    }
-
-} catch (err) {
-    
-    res.json({message: "There was an error..."})
-  
-  }
-
-}
-
-
-//fetch all of user's referrals
-static async fetch_referrals (req, res) {
-
-   let referrals = []
-
-   let i = 0
+   let search_data_length = search_data.length
 
    try {
 
-    const user = await client.findOne({email: req.session.email})
+       let all = await post.find({status: "Published"}) //fetch all the properties when they published
 
-    let all_referrals = user.referres
+       let customer = pattern.test(search_data) ? await client.findOne({email: search_data}) : null //check if search data na email address. if he contain na b say user wan see all the properties of another user. so we fetch the user from here keep so we go fit fetch all he listings later. 
+ 
+       search_data === "" ? listings = all.reverse()  //if nothing they search data, just send all the listings wen dey published.
+       
+       : pattern.test(search_data) ? (async () => { //check if search data na email address. if he contain na b say user wan see all the properties of another user.
 
-    while (i < all_referrals.length) {
+       if (customer) { //if the user they.
 
-    let referre = await client.findOne({email: all_referrals[i]})
+           customer.listings.forEach( (listing_id) => { //carry he listings id use am fetch the listings from all
 
-    if (referre) {
+           all.forEach( (listing) => {
 
-    referrals.push({
-      email: referre.email,
-      full_name: `${referre.firstname} ${referre.lastname}`,
-      status: referre.status
-    })
+             listing_id === listing.id ? listings.unshift(listing) : null
 
-   i++
-      
-   }
+           })
 
-   i++
+         })
+         
+       }
+       
+       })()
+             
+       : all.forEach((listing) => { //if na normal string, searcch for am.
+ 
+       let convert_state = listing.state.toLowerCase().slice(0, (search_data_length)) //convert state to the same exact length of search data, so you can compare.
+ 
+       let convert_town = listing.town.toLowerCase().slice(0, (search_data_length)) //convert town to the same exact length of search data, so you can compare.
+ 
+       let convert_location = listing.location.toLowerCase().slice(0, (search_data_length)) //convert location to the same exact length of search data, so you can compare.
+  
+       if (convert_state === search_data || convert_town === search_data || convert_location === search_data) { //if check state, town, location of there is a match for search data
+ 
+         listings.includes(listing) ? null : listings.unshift(listing) //if property already exists on the array skip it
+       
+       }
+ 
+     }) 
+ 
+     if (listings.length === 0) { //if that first search return nothing, try this. this one carries each search word, and checks if its a state, town or exists in the address(location)
+
+       let devide_search_data = search_data.split(" ");
+       
+       devide_search_data.forEach( (str) => {
+ 
+       all.forEach( (listing) => {
+ 
+         if (str === listing.state.toLowerCase() || str === listing.town.toLowerCase() || listing.location.toLowerCase().includes(str)) { //checks if its a state, town or exists in the address(location)
+ 
+           listings.includes(listing) ? null : listings.unshift(listing) //if property already exists on the array skip it
+         
+         }
+ 
+       })
+ 
+       })
+ 
+     }
+
+ /* LISTINGS FILTER */
+       let temporal_array = []
+
+       let arr = [category, type, min_price, max_price, bedrooms]
+
+       let current_listing, category_result, type_result, min_price_result, max_price_result, bedroom_result;
+
+        while (counter1 < listings.length) {
+
+           current_listing = listings[counter1]
+
+           category_result = arr[0] === "Category" ? true : current_listing.category === arr[0]
+           
+           type_result = arr[1] === "Property Type" ? true : current_listing.type === arr[1] || current_listing.subtype === arr[1]
+
+           min_price_result = arr[2] === "Min price" ? true : current_listing.price >= arr[2]
+
+           max_price_result = arr[3] === "Max price" ? true : current_listing.price <= arr[3]
+
+           bedroom_result = arr[4] === "Bedrooms(No limit)" ? true : current_listing.bedroom === arr[4]
+
+           if (category_result && type_result && min_price_result && max_price_result && bedroom_result) {
+
+            temporal_array.unshift(current_listing)
+              
+           } 
+
+           counter1++
+
+        } 
+
+   listings = temporal_array.reverse()
+
+   /* LISTINGS FILTER */
+    
+   const email = req.session.email 
+
+   const user = await client.findOne({email: email}) || "" //fetch the user, just incase he get session. because i need to fetch the user favorites also
+
+   //DEVIDE LISTINGS INTO PAGES
+   const limit = 40;
+
+   let total_pages = Math.ceil(listings.length / limit)  //count the number of pages
+
+   if (total_pages === 0) { //if total pages na 0 add 1 join, make he no spoil your loop
+
+   total_pages = total_pages + 1;
+
+   }  
+
+   if (MIDDLEWARES.validate_page_number(page, total_pages)) { //if page number is valid
+
+   const startIndex = (page - 1) * limit;
+
+   const endIndex = page * limit
+
+   const paginatedListings =  listings.slice(startIndex, endIndex);
+
+   res.json({paginatedListings: paginatedListings, all_listings: listings, favorites: user.favorites || [],  total_pages: total_pages, search_data: search_data});
+
+   } else {
+
+   res.json({message: "Bad request"});
+
+   } 
+
+} catch (err) {
+
+  res.json({message: "error occured"})
 
   }
 
-  res.json({referrals: referrals})
-    
-  } catch (error) {
-
-  res.json({referrals: referrals})
-    
-  }
-
 }
 
 
-//ADMIN REQUESTS
 
-//get pending listing
-static async get_pendingListings (req, res) {
-
-try {
-
-  const listings = await post.find({status: "Pending"})
-
-  res.json({message: listings})
-  
-} catch (error) {
-
-  console.log(error.message)
-  
-}
-
-}
-
-
-//get single pending listing
-static async get_singleListing (req, res) {
-
-  let listing_id = req.params.id; //Id of the listing 
-
-  let counter = 0;
+//fetch all requests
+static async fetch_requests (req, res) {
 
   try {
-  
-      const listing = await post.findOne({id: listing_id})
-   
-      let users = await client.find({}) //Fetch all your users
-   
-      while (counter < users.length) { //loop through them
-           
-      let userListingsArray =  users[counter].listings //User Listings id array
-   
-      let listing_array_id = userListingsArray.find( (id) => { //Check if the listing id dey inside the user listings 
-   
-      return id === listing_id
-   
-      })
-   
-      if (listing_array_id) { //if he dey, return that user and stop the loop
 
-       res.json({listing:listing, user: users[counter]})
+   const user_requests = await requests.find({})
 
-       break;
-        
-      } else { //otherwise keep going until you reach the end
-   
-       counter++;
-   
-      }
-
-   }
-
+   res.json({all_requests: user_requests})
+    
   } catch (error) {
+    
+   res.json({message: "bad request"})
+
+  }
+   
+}
+
+
+
+//fetch all users
+static async fetch_users (req, res) {
+
+  try {
+
+   const users = await client.find({})
+
+   res.json({users: users})
+    
+  } catch (error) {
+    
+   res.json({message: "bad request"})
+
+  }
+   
+}
+
+ 
+
+//logout user
+static async logout (req, res) {
   
-     res.json({message:  "something went wrong"})
+  try {
+
+    req.session.destroy()
+
+    res.json({message: "logged out"})
+    
+  } catch (error) {
+
+    res.json({message: "An error occcured"})
     
   }
-
-}
-
-//approve or decline listings
-static async approve_decline (req, res) {
-
-const data = req.body;
-
-try {
-
-  switch (data.status) { //check status of the property, if it was approved or declined
-
-    case "approved":
-      
-    let listing = await post.findOne({id: data.listing_id}) //find the listing
-
-    let user = await client.findOne({email: data.user_email}) //find the landlord
-
-    listing.status = "Published" //change listing status to published
-
-    user.easycoins == 0 ? null : user.easycoins -= 1 //if the landlord easycoins na 0 already, no minus from am. else, minus 1 coin
-
-    await listing.save();
-
-    await user.save()
-
-    MIDDLEWARES.approval(req, res, data.listing_id,  data.user_email, data.firstname) //notify user listing was approved with email
-
-    res.json({message: "Listing was approved"})
-
-    break;
-
-    case "declined":
-
-    listing = await post.findOne({id: data.listing_id})
-
-    listing.status = "Unpublished" //change listing status to published
   
-    await listing.save();
-  
-    MIDDLEWARES.declined(req, res, data.listing_id,  data.user_email, data.firstname) //notify user listing was declined with email
-
-    res.json({message: "Listing was declined"})
-
-    break;
-  
-    default:
-
-    break;
-
-  }
-  
-} catch (error) {
-  
-  res.json({message: "something went wrong, try again"})
-
-}
-
 }
 
 //PATCH REQUESTS 
 
-//change listing status
+//change listing status (post picture page na he dey)
 static async change_status (req, res) {
+  
+  if (req.session.email) { //if session dey
+    
+  try {
 
   const listing_id = req.body.listing_id //listing id
 
   const status = req.body.status //status listing should be changed to this
-
-  try {
     
   const user = await client.findOne({email: req.session.email});
 
@@ -1654,21 +1057,31 @@ static async change_status (req, res) {
     
   listing.status = status
 
+  listing.dateSubmitted = MIDDLEWARES.date()
+
   await listing.save();
+
+  MIDDLEWARES.new_listing_alert(req, res, listing) //notify admin
 
   res.json({message: "Success"})
 
   } else {
 
-    res.json({message: "Bad request"});
+  res.json({message: "Bad request"});
   
   }
 
  } catch (err) {
     
-    res.json({message: "Something went wrong, try again"})
+    res.json({message: err.message})
   
   }
+
+} else { //if session no dey
+
+  res.json({message: "no session"})
+
+}
 
 }
 
@@ -1676,6 +1089,8 @@ static async change_status (req, res) {
 //update_login_counter
 static async update_login_counter (req, res) {
 
+  if (req.session.email) { //if session dey
+  
   try {
     
   const user = await client.findOne({email: req.session.email});
@@ -1700,20 +1115,46 @@ static async update_login_counter (req, res) {
   
   }
 
+} else { //if session no dy
+
+   res.json({message: "no session"})
+
+}
+
 }
 
 
+//update_viewedlisting_counter
+static async update_viewedlisting_counter(req, res) {
+
+  let listing_id = req.body.id
+
+  let listing = await post.findOne({id: listing_id})
+
+  if (listing) {
+
+    listing.views++;
+
+    await listing.save()
+
+    res.json({message: "success"})
+    
+  } else {
+
+    res.json({message: "bad request"})
+    
+  }
+
+}
+
 //update property information 
 static async update_property_info (req, res) {
-
- const data = req.body;
+ 
+ if (req.session.email) { //if session dey
 
  try {
 
-
-  if (req.session.email) {
-    
-    data.price = new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(data.price); //format price with naira icon
+    const data = req.body;
 
     const listing = await post.findOneAndUpdate({id: data.id}, data); //find the listing with the id and update
 
@@ -1725,146 +1166,394 @@ static async update_property_info (req, res) {
 
     res.json({message: "invalid request"}) //if you know see am flag error
 
-    }
+   } 
 
-  } else { //if user has no session
-
-    res.json({message: "invalid request"})
-
-  }
-   
  } catch (error) {
-   
-  if (error) { //if error occurs
 
-    res.json({message: "something went wrong"})
-
-  }
+    res.json({message: "error occured"})
 
  }
+
+ } else { //if no session
+
+  res.json({message: "no session"})
+
+}
 
 }
 
 
+//Used to update user category for listings
+static async filter (req, res) {
+
+  if (req.session.email) { //if session dey
+
+  try {
+
+  const category = req.body.parameter; //this will return All, Pending, Published or Unpublished
+
+  const page = req.body.page;
+
+  const user = await client.findOne({email: req.session.email}); //get the user account
+
+  page === "properties" ? user.settings.filterListings = category  : user.settings.filterRequests = category
+  
+  await user.save()   
+
+} catch (err) {
+ 
+ res.json({message: "There was an error..."})
+
+}
+
+} else {
+
+ res.json({message: "no session"})
+
+}
+}
+
+//update user information 
+  static async update_user_info (req, res) {
+ 
+    if (req.session.email) { //if session dey
+
+    try {
+
+      let filename, user;
+
+      const data = JSON.parse(JSON.stringify(req.body)) //what is coming isnt a real object, i had to convert it to one
+
+      user = await client.findOne({email: data.email}) //get the user first
+
+      const oldfilename = user.company_logo || " "//get the old company_logo filename
+      
+      data.company_logo = oldfilename
+
+      const upload = req.file //company logo file
+
+      if (upload) { //upload file if only there is a file
+
+        MIDDLEWARES.delete_bucket_pictures(oldfilename) //delete the old company_logo from s3 bucket
+
+        const randomImageName = (bytes = 32) => crypto.randomBytes(bytes).toString("hex");
+
+        filename = randomImageName() + '_company_logo' //create new company_logo filename
+
+        data.company_logo = filename //add filename to the info to be updated
+
+        const params = {
+          Bucket: BUCKET_NAME,
+          Key: filename,
+          Body: upload.buffer,
+          ContentType: upload.mimetype
+        }
+    
+        const command = new PutObjectCommand(params)
+    
+        const response = await s3.send(command)
+        
+      }
+
+      await client.findOneAndUpdate({email: data.email}, data); //find the user with his email and update
+
+      res.json({message: "Updated", company_logo: filename})
+
+    } catch (error) {
+
+      console.log(error.message)
+
+      res.json({message: "error occured"})
+      
+    }
+
+  } else { //if session no dey
+
+    res.json({message: "no session"})
+
+  }
+
+}
+
+  //update user password 
+  static async update_password (req, res) {
+
+    if (req.session.email) { //if session dey
+
+    try {
+
+      const data = req.body
+
+      const user = await client.findOne({email: req.session.email}) //find the user first
+
+      const isMatch = await bcrypt.compare(data.old_password, user.password); //compare the current pass, with the old one if he match 
+  
+      if (isMatch) { //if he match
+        
+      user.password = await bcrypt.hash(data.new_password, 12); //encrypt the new password and use am replace old one
+ 
+      await user.save()
+
+      res.json({message: "Updated"})
+      
+      }  else {
+
+      res.json({message: "Old password incorrect"})
+
+      }
+
+    } catch (error) {
+
+      res.json({message: "error occured"})
+      
+    }
+
+  } else { //if session no dey
+
+    res.json({message: "no session"})
+
+  }
+
+}
+
+ //unscribe user from new property alert
+ static async subscribe_unsubscribe_user_for_listings (req, res) {
+
+   const {fullname, email, category} = req.body;
+
+   let message;
+
+   const administrator = await admin.findOne({pin: "2456"}) //fetch adimin;
+
+   let new_subscriber = {email: email.toLowerCase(), fullname: fullname}
+
+   switch (category) {
+    
+    case "Unsubscribe":
+
+    administrator.users_to_notify_on_listings = administrator.users_to_notify_on_listings.filter((subscribers) => {
+              
+        return subscribers.email !== email.toLowerCase()
+
+    })
+
+    message = "Unsubscribed successfully"
+
+    break;
+
+    case "Subscribe":
+
+    let contains = administrator.users_to_notify_on_listings.filter( (subscribers) => {
+
+        return subscribers.email === email.toLowerCase()
+    
+    }) 
+
+    if (contains.length <= 0) {
+
+      administrator.users_to_notify_on_listings.push(new_subscriber)
+      
+    }
+
+    message = "Subscribed successfully"
+
+    break;
+  
+  }
+
+   await administrator.save()
+   
+   res.json({message: message})
+
+ }
+
+
+ //unscribe user from new property request alert
+ static async subscribe_unsubscribe_user_for_requests (req, res) {
+
+  const {fullname, email, category} = req.body;
+
+  let message;
+
+  const administrator = await admin.findOne({pin: "2456"}) //fetch adimin;
+
+  let new_subscriber = {email: email.toLowerCase(), fullname: fullname}
+
+  switch (category) {
+   
+   case "Unsubscribe":
+
+   administrator.users_to_notify_on_requests = administrator.users_to_notify_on_requests.filter((subscribers) => {
+             
+       return subscribers.email !== email.toLowerCase()
+
+   })
+
+   message = "Unsubscribed successfully"
+
+   break;
+
+   case "Subscribe":
+
+   let contains = administrator.users_to_notify_on_requests.filter( (subscribers) => {
+
+       return subscribers.email === email.toLowerCase()
+   
+   }) 
+
+   if (contains.length <= 0) {
+
+     administrator.users_to_notify_on_requests.push(new_subscriber)
+     
+   }
+
+   message = "Subscribed successfully"
+
+   break;
+ 
+ }
+
+  await administrator.save()
+  
+  res.json({message: message})
+
+}
+
+ 
 
 //DELETE REQUESTS
 
   //delete pictures
   static async delete_pictures (req, res) {
-  
-  const imgsrc = req.body.imgsrc //picture's src
 
-  const listing_id = req.body.listing_id //listing id
+    if (req.session.email) { //if sessionn dey
 
-  try {
-      
-    const user = await client.findOne({email: req.session.email});
-
-    if (user) {
-      
-    let listing = await post.findOne({id: listing_id});
-
-    //Delete Picture from Database
-    let newArray = listing.pictures.filter( (src, index, array) => {  
-         return src != imgsrc
-    });
-
-    listing.pictures = newArray
-
-    await listing.save();
-
-   //Delete Picture from Folder
-    fs.unlinkSync('./property_images/' + imgsrc);
-
-    res.json({message: "Deleted successfully"})
-
-    } else {
-
-    res.json({message: "Bad request"});
-
-   }
-
-   } catch (err) {
+      try {
     
-   res.json({message: "Something went wrong, try again"})
-  
-   }
+        const imgsrc = req.body.imgsrc //picture's src
+    
+        const listing_id = req.body.listing_id //listing id
+          
+        const user = await client.findOne({email: req.session.email});
+    
+        if (user) {
+          
+        let listing = await post.findOne({id: listing_id});
+        
+        //Delete Pictures from S3 bucket
+        MIDDLEWARES.delete_bucket_pictures(imgsrc)
+        
+    
+        //Delete Picture from Database
+        let newArray = listing.pictures.filter( (src, index, array) => {  
+             return src != imgsrc
+        });
+    
+        listing.pictures = newArray
+    
+        await listing.save();
+      
+        res.json({message: "Deleted successfully"})
+    
+        } else {
+    
+        res.json({message: "Bad request"});
+    
+        }
+    
+       } catch (err) {
+        
+       res.json({message: "Something went wrong, try again"})
+      
+       }
+    
+     } else { //if no session
+    
+       res.json({message: "no session"})
+    
+     }
 
- }
+}
 
 
   //delete listing individually
   static async delete_listing (req, res) {
-  
-    const listing_id = req.body.listing_id //listing id
-  
-    let counter = 0;
 
-    try {
+    if (req.session.email) { //if session dey
 
-      if (req.session.email) {
-
-        const user = await client.findOne({email: req.session.email})
-
-        const listing = await post.findOneAndDelete({id: listing_id})  //delete listing
-
-        if (listing) { //if delete was successful
-
-        const pictures = listing.pictures //get array containing all the listing pictures
-          
-        //delete listing pictures from folder
-        while (counter < pictures.length) {
-
-          fs.unlinkSync('./property_images/' + pictures[counter]); //Delete profile picture also from folder
-          
-          counter++;
-
-        } 
-
-        //delete the listing id from user's listings array
-       user.listings =  user.listings.filter( (id)=> {
-
-          return id !=  listing_id
-
-        })
-
-       await user.save()
-
-       res.json({message: "delete succesful"})
-
-      } else { //if listing failed to delete
-  
-        res.json({message: "delete failed"})
-
-      }
+      try {
        
-    } else { //if no session for user
-
-       res.json({message: "something went wrong, try again later"})
-
-    }
-     
-      } catch (error) {
-      
-      res.json({message: "something went wrong, try again later"}) 
-
-    }
+         const listing_id = req.body.listing_id //listing id
+    
+         let counter = 0;
   
-  }
+          const user = await client.findOne({email: req.session.email})
+  
+          const listing = await post.findOneAndDelete({id: listing_id})  //delete listing
+  
+          if (listing) { //if delete was successful
+  
+          const pictures = listing.pictures //get array containing all the listing pictures
+            
+         /*Delete listing pictures from S3 bucket*/
+         while (counter < pictures.length) {
+         
+         //Delete Pictures from S3 bucket
+         MIDDLEWARES.delete_bucket_pictures(pictures[counter])
+         
+         counter++
+  
+        } 
+  
+        //delete the listing id from user's listings array
+        user.listings =  user.listings.filter( (id)=> {
+  
+            return id !=  listing_id
+  
+         })
+  
+         await user.save()
+  
+         res.json({message: "delete succesful"})
+  
+        } else { //if listing failed to delete
+    
+          res.json({message: "delete failed"})
+  
+        }
+         
+      }  catch (error) {
+        
+        res.json({message: "something went wrong, try again later"}) 
+  
+      } 
+    
+    } else { //if session dey
+  
+      res.json({message: "no session"})
+  
+    }
+
+}
+
 
   //delete listings categorically
   static async delete_listings_categorically (req, res) {
+
+    if (req.session.email) { //if session dey
+
+    try {
+
+    var message;
 
     let counter = 0, counter2 = 0;
 
     let category = req.body.category.split(" ")[1]
 
-    let listing
+    let listing;
 
     let pictures;
-
-    try {
-    
+  
     const user = await client.findOne({email: req.session.email});
 
     if (user) {
@@ -1872,31 +1561,32 @@ static async update_property_info (req, res) {
     const listingsId = user.listings //its an array
 
     if (category === "All") { //if the category no be All, fetch using the category
-
-      while (counter < listingsId.length) {
+    
+      while (counter < listingsId.length) {    
       
          listing = await post.findOneAndDelete({id: listingsId[counter]}) //delete listings
 
         if (listing) { //if listing deletes succesfully
           
-           pictures = listing.pictures //get array containing all the listing pictures
-              
-            //delete listing pictures from folder
-            counter2 = 0;
+          pictures = listing.pictures //get array containing all the listing pictures
+            
+          //delete listing pictures from folder
+          counter2 = 0;
 
-            while (counter2 < pictures.length) {
+        while (counter2 < pictures.length) {
+        
+        //Delete Pictures from S3 bucket
+        MIDDLEWARES.delete_bucket_pictures(pictures[counter2])
+       
+        counter2++;
     
-              fs.unlinkSync('./property_images/' + pictures[counter2]); //Delete listing pictures also from folder
-              
-              counter2++;
-    
-            }   
+       }   
 
-            counter++;
+        counter++;
 
-        } else { //if listing not deleted, just go to next post
+       } else { //if listing not deleted, just go to next post
 
-            counter++;
+          counter++;
 
         }
   
@@ -1905,9 +1595,7 @@ static async update_property_info (req, res) {
     //delete the listing id from user's listings array
      user.listings = []
 
-     await user.save()
-       
-     res.json({message: "success"})
+     message = "success"
 
     } else { //if category no be "All"
 
@@ -1924,9 +1612,10 @@ static async update_property_info (req, res) {
 
             while (counter2 < pictures.length) {
     
-              fs.unlinkSync('./property_images/' + pictures[counter2]); //Delete listing pictures also from folder
-              
-              counter2++;
+            //Delete Pictures from S3 bucket
+            MIDDLEWARES.delete_bucket_pictures(pictures[counter2])
+            
+            counter2++
     
             }   
 
@@ -1936,8 +1625,6 @@ static async update_property_info (req, res) {
           return id !=  listing.id
 
           })
-
-         await user.save()
 
          counter++;
 
@@ -1951,29 +1638,37 @@ static async update_property_info (req, res) {
     
     }
 
-  res.json({message: "success"})
+   message = "success"
 
  } else {
 
-  res.json({message: "Bad request"});
+   message = "Bad request"
 
   }
-    
+ 
+  await user.save()
+  
  } catch (err) {
     
-    res.json({message: "There was an error..."})
+     message = "There was an error..."
   
   }
 
+} else { //if session no dey
+
+    message = "no session"
+
+}
+    res.json({message: message})
 }
 
 
 //Remove all properties from favorites
 static async remove_all_properties  (req, res) {
 
-  try {
+  if (req.session.email) { //if session dey
 
-    if (req.session.email) {
+  try {
 
       const user = await client.findOne({email: req.session.email})
 
@@ -1990,12 +1685,6 @@ static async remove_all_properties  (req, res) {
       res.json({message: "Bad request"})
 
       }
-      
-    } else {
-
-     res.json({message: "Bad request"})
-
-    }
     
   } catch (error) {
 
@@ -2003,6 +1692,202 @@ static async remove_all_properties  (req, res) {
     
   }
 
+} else { //if no session
+
+  res.json({message: "no session"})
+
 }
+
+}
+
+
+
+
+//delete user account
+static async delete_account (req, res) { 
+ 
+  if (req.session.email) { //if session dey
+    
+  try {
+           
+      let counter = 0, counter2 = 0;
+
+      let pictures;
+
+      const user = await client.findOneAndDelete({email: req.session.email}) //delete the user document
+
+      while (counter < user.listings.length) {
+
+      const listing = await post.findOneAndDelete({id: user.listings[counter]}) || {} //delete all the user listings
+
+      pictures = listing.pictures || [] //get array containing all the listing pictures
+            
+      counter2 = 0;
+
+      while (counter2 < pictures.length) {
+          
+          //Delete Pictures from S3 bucket
+          MIDDLEWARES.delete_bucket_pictures(pictures[counter2])
+          
+          counter2++
+
+      }
+
+        counter++
+        
+    }
+
+      await req.session.destroy() //destroy user session
+
+      res.json({message: "Account deleted"})
+            
+  } catch (error) {
+
+    res.json({message: "Something went wrong, try again"})
+    
+  }
+
+} else {
+
+  res.json({message: "no session"})
+
+}
+
+}
+
+//delete request individually
+static async delete_request (req, res) {
+
+  if (req.session.email) { //if session dey
+
+    try {
+     
+       const request_id = req.body.request_id //listing id
   
+       let counter = 0;
+
+        const user = await client.findOne({email: req.session.email})
+
+        const listing = await requests.findOneAndDelete({id: request_id})  //delete listing
+
+        if (listing) { //if delete was successful
+
+      //delete the listing id from user's listings array
+      user.my_requests =  user.my_requests.filter( (id)=> {
+
+          return id !=  request_id
+
+       })
+
+       await user.save()
+
+       res.json({message: "delete succesful"})
+
+      } else { //if request failed to delete
+  
+        res.json({message: "delete failed"})
+
+      }
+       
+    }  catch (error) {
+      
+      res.json({message: "something went wrong, try again later"}) 
+
+    } 
+  
+  } else { //if session dey
+
+    res.json({message: "no session"})
+
+  }
+
+}
+
+
+//delete requests categorically
+static async delete_requests_categorically (req, res) {
+
+  if (req.session.email) { //if session dey
+
+  try {
+
+  var message;
+
+  let counter = 0, counter2 = 0;
+
+  let category = req.body.category.split(" ")[1]
+
+  let request;
+
+  const user = await client.findOne({email: req.session.email});
+
+  if (user) {
+
+  const request_id = user.my_requests //its an array
+
+  if (category === "All") { //if the category no be All, fetch using the category
+  
+    while (counter < request_id.length) {    
+    
+       request = await requests.findOneAndDelete({id: request_id[counter]}) //delete listings
+
+       counter++;
+
+    }
+
+  //delete the listing id from user's listings array
+   user.my_requests = []
+
+   message = "success"
+
+  } else { //if category no be "All"
+
+    while (counter < request_id.length) {
+    
+       request = await requests.findOneAndDelete({id: request_id[counter], status: category}) //delete requests
+        
+       if (request) {
+        
+        //delete the listing id from user's listings array
+        user.my_requests =  user.my_requests.filter( (id)=> {
+
+          return id !=  request.id
+  
+          })
+  
+
+       }
+        
+       counter++;      
+ 
+    }
+  
+  }
+
+ message = "success"
+
+} else {
+
+ message = "Bad request"
+
+}
+
+await user.save()
+
+} catch (err) {
+  
+   message = "There was an error..."
+
+}
+
+} else { //if session no dey
+
+  message = "no session"
+
+}
+  res.json({message: message})
+}
+
+
+
 }

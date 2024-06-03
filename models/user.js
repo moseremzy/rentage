@@ -40,7 +40,7 @@ const userschema = mongoose.Schema({
 
    easycoins: {
        type: Number,
-       default: 20
+       default: 10
    },
 
    new_referral_code: {
@@ -56,17 +56,31 @@ const userschema = mongoose.Schema({
 
    listings: [String],
 
+   my_requests: [String],
+
    favorites: [String],
 
    settings: {
-
+ 
    filterListings: {
         type: String,
-        enum: ["All", "Unpublished listings", "Pending listings", "Published listings"],
+        //enum: ["All", "Unpublished listings", "Pending listings", "Published listings"],
         default: "All"
     },
 
-},
+    filterRequests: {
+        type: String,
+        //enum: ["All", "Unpublished requests", "Pending requests", "Published requests"],
+        default: "All"
+    }
+
+   },
+
+   new_property_alert: {
+        type: String,
+        enum: ["Subscribed", "Unsubscribed"],
+        default: "Subscribed"
+   },
 
    payments_history: [{ 
         reference: String,
@@ -78,7 +92,35 @@ const userschema = mongoose.Schema({
         status: String
   }],
 
-    createdAt: {
+  password_reset_token: {
+      type: String,
+  },
+
+  company_name: {
+      type: String,
+  },
+
+  company_address: {
+    type: String,
+  },
+
+  whatsapp: {
+      type: String
+  },
+
+  website_link: {
+      type: String
+  },
+
+  about_company: {
+      type: String
+  },
+
+  company_logo: {
+      type: String
+  },
+
+  expiresAt: {
     type: Date,
     default: Date.now,
     expires: '2d', // Account expires in 2days

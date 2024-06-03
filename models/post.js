@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const postschema = mongoose.Schema({
 
+
     title: {
         required: true,
         type: String,
@@ -53,6 +54,14 @@ const postschema = mongoose.Schema({
     bedroom: {
     type: Number,
   },
+
+    classroom: {
+      type: Number,
+    },
+
+    fuelpump: {
+      type: Number,
+    },
    
     bathroom: {
     required: true,
@@ -69,6 +78,10 @@ const postschema = mongoose.Schema({
     unique: false,
   },
 
+   total_area: {
+    type: Number,
+  },
+
   description: {
     type: String,
   },
@@ -78,6 +91,8 @@ const postschema = mongoose.Schema({
     enum: ['Unpublished', 'Pending', 'Published'],
     default: 'Unpublished'
 },
+
+  coordinates: Object,
   
   id: {
     type: String,
@@ -90,7 +105,11 @@ const postschema = mongoose.Schema({
     default: 0
   },
 
-  dateAdded: {
+  dateAdded: { //the date the listing was created
+    type: String,
+  },
+
+  dateSubmitted: { //the date the listing was submitted for review
     type: String,
   }
 
