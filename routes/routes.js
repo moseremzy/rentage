@@ -5,7 +5,7 @@ const API = require("../api/api")
 const session = require("express-session");
 const check_session = require("../helper/helper.js");
 const Mongodbsession = require("connect-mongodb-session")(session)
-const Uri = process.env.URI
+const Uri = "mongodb+srv://easyrentage:JAOopp9hG9k3e2BC@cluster0.zwqc7ko.mongodb.net/easyrentage?retryWrites=true&w=majority"
 const multer = require("multer");
 var timeout = require('connect-timeout')
 
