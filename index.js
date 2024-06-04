@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const port = process.env.PORT || 8000;
-const Uri = process.env.URI
+const Uri = "mongodb+srv://easyrentage:JAOopp9hG9k3e2BC@cluster0.zwqc7ko.mongodb.net/easyrentage?retryWrites=true&w=majority"
 const routes = require("./routes/routes")
 const app = express();
 const path = require("path")
